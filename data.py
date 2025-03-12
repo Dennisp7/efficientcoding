@@ -32,8 +32,8 @@ def estimated_covariance(dataset: Dataset, num_samples: int, device: Union[str, 
     samples = torch.stack([dataset[index].flatten() for _ in loop])  # / dataset.mask
     if device is not None:
         samples = samples.to(device)
-    samples -= samples.mean(dim=0, keepdim=True)
-    C = samples.t() @ samples / num_samples
+    samples -= samples.mean(dim=0, keepdim=True) # mean shift
+    C = samples.t() @ samples / num_samples # X @ XT / number of samples
     C = (C + C.t()) / 2.0  # make it numerically symmetric
     return C
 
@@ -287,16 +287,28 @@ class KyotoNaturalImages(Dataset):
 
 def get_dataset(data: str, kernel_size: Union[int, Tuple[int, int]], frames: int, circle_masking: bool,
                 group_size: Optional[int], random_flip: bool, neural_type: Optional[str], input_noise: Optional[float]):
+    # if data == "pink":
+    #     dataset = VideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip)
+    #     covariance = dataset.covariance()
+    #     return MultivariateGaussianDataset(covariance)
+    # elif data == "pink_tempfilter":
+    #     dataset = FilteredVideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
+    #     covariance = dataset.covariance()
+    #     return MultivariateGaussianDataset(covariance)
+    # elif data == "real_tempfilter":
+    #     return FilteredVideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
+    # elif data == "kyoto":
+    #     return KyotoNaturalImages("kyoto", kernel_size, circle_masking, device='cuda')
     if data == "pink":
-        dataset = VideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip)
+        dataset = VideoDataset("palmer_full", kernel_size, frames, circle_masking, group_size, random_flip)
         covariance = dataset.covariance()
         return MultivariateGaussianDataset(covariance)
     elif data == "pink_tempfilter":
-        dataset = FilteredVideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
+        dataset = FilteredVideoDataset("palmer_full", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
         covariance = dataset.covariance()
         return MultivariateGaussianDataset(covariance)
     elif data == "real_tempfilter":
-        return FilteredVideoDataset("palmer", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
+        return FilteredVideoDataset("palmer_full", kernel_size, frames, circle_masking, group_size, random_flip, neural_type, input_noise)
     elif data == "kyoto":
         return KyotoNaturalImages("kyoto", kernel_size, circle_masking, device='cuda')
 

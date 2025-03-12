@@ -1,3 +1,8 @@
+#%%
+import os 
+os.chdir('/home/dennis/efficientcoding') 
+
+#%%
 import json
 import random
 import sys
@@ -17,7 +22,7 @@ from tqdm import trange
 from data import get_dataset, KyotoNaturalImages
 from model import Retina, OutputTerms, OutputMetrics
 from util import cycle, kernel_images, plot_convolution
-
+#%%
 
 def set_seed(seed=None, seed_torch=True):
     if seed is None:
@@ -33,13 +38,22 @@ def set_seed(seed=None, seed_torch=True):
 
     print(f'Random seed {seed} has been set.')
 
+# this is where the logs are being stored
+# run commands in terminal from gpt under chat ("Access TensorBoard on Web/find logs") 
+# to start tensorboard with a given directory, use the most recent time stamp. run this command:
+# ls -lt /tmp | head -n 20 
+# choose the latest time stamp
+# then run tensorboard --logdir=/tmp/250311-161530 --port=6007
+# after running this, click open browser in pop up
 
 def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S"),
           iterations: int = 500000,
           same_video_batch: bool = False,  # sampling minibatch from a single video file
           random_flip: bool = True,  # random up-and-down, left-and-right video flip after sampling the batch
-          batch_size: int = 128,
-          data: str = "palmer",
+          batch_size: int = 128, 
+          # change to palmer_full - full ds here
+        #   data: str = "palmer", 
+          data: str = "palmer_full",
           kernel_size: int = 18,  # kernel shape is kernel_size * kernel_size (square shape)
           temporal_kernel_size: int = 20,
           input_padding: Optional[str] = None,  # ["data", "zero"]
@@ -65,7 +79,8 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
           temporal_filter_type: Optional[str] = "difference-of-exponentials",  # if None, it learns temporal filters without parameterization
           maxgradnorm: float = 20.0,
           load_checkpoint: str = None,  # path of the checkpoint file to resume training from
-          device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+          # only use cuda:0 from mach
+          device: str = 'cuda:0' if torch.cuda.is_available() else 'cpu',
           neural_type: Optional[str] = None,  # only used for FilteredVideoDataset (NeurIPS paper Fig 5)
           fix_first_two_centers: bool = False,  # only used for FilteredVideoDataset experiments (NeurIPS paper Fig 5)
           random_seed: str = 44,
@@ -267,5 +282,19 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
     writer.close()
 
 
+# if __name__ == "__main__":
+#     fire.Fire(train)
+
 if __name__ == "__main__":
-    fire.Fire(train)
+    import sys
+    # Check if running in an interactive environment
+    if any(arg.startswith("--f=") for arg in sys.argv) or "--ip" in sys.argv:
+        print("Interactive environment detected. Manually calling train().")
+
+        # Filter out unwanted arguments passed by the interactive environment
+        sys.argv = [sys.argv[0]]
+
+        train()
+    else:
+        fire.Fire(train)
+# %%

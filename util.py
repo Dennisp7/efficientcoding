@@ -3,7 +3,10 @@ import math
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
+import torch 
+import io 
+import PIL 
+from PIL import Image
 
 matplotlib.use("agg")
 
@@ -41,6 +44,25 @@ def kernel_images(W, kernel_size, image_channels, rows=None, cols=None, spacing=
 
     return kernels.clip(0, 1)
 
+# contains deprecated function .tostrin_rgb()
+# def plot_convolution(weight: torch.Tensor):
+#     if torch.is_tensor(weight):
+#         weight = weight.numpy()
+#     weight = weight / np.linalg.norm(weight, axis=-1, keepdims=True)
+
+#     fig = plt.figure(figsize=(4, 4))
+#     plt.plot(weight[:, 0, :].T)
+#     plt.tight_layout()
+#     fig.canvas.draw()
+
+#     buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+#     ncol, nrow = fig.canvas.get_width_height()
+#     buf = buf.reshape(ncol, nrow, 3)
+#     plt.close()
+
+#     return buf.transpose(2, 0, 1)
+
+
 
 def plot_convolution(weight: torch.Tensor):
     if torch.is_tensor(weight):
@@ -52,10 +74,17 @@ def plot_convolution(weight: torch.Tensor):
     plt.tight_layout()
     fig.canvas.draw()
 
-    buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    ncol, nrow = fig.canvas.get_width_height()
-    buf = buf.reshape(ncol, nrow, 3)
+    # Save the figure to a buffer as a PNG
+    buf = io.BytesIO()
+    fig.canvas.print_png(buf)  
+    buf.seek(0)  # Move to the start of the buffer
+
+    # Convert PNG buffer to a NumPy array
+    img = Image.open(buf)  
+    img = np.array(img)  # Convert PIL image to NumPy array
+
+    nrow, ncol, _ = img.shape  # Get image dimensions
     plt.close()
 
-    return buf.transpose(2, 0, 1)
+    return img.transpose(2, 0, 1)  # Convert to (C, H, W) format
 
