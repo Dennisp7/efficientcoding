@@ -1,5 +1,6 @@
 import torch
 
+# this script contains precomputed temporal kernel values to run the experiments in Supplementary Figure 3.
 
 def preset_temp(ntype):  # (8 mosaics) ver
     if ntype == 'slow':

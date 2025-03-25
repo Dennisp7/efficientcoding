@@ -1,7 +1,10 @@
 #%%
+# latest tensorboard run  tensorboard --logdir=/tmp/250312-121714 --port=6007
+# 3/13 tensorboard --logdir=/tmp/250313-125213 --port=6007 
+# 3/14 tensorboard --logdir=/tmp/250314-130713 --port=6007 
 import os 
 os.chdir('/home/dennis/efficientcoding') 
-
+# need to CD into efficient coding folder to access github
 #%%
 import json
 import random
@@ -20,7 +23,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
 from data import get_dataset, KyotoNaturalImages
-from model import Retina, OutputTerms, OutputMetrics
+from model import *
+# from model import Retina, OutputTerms, OutputMetrics
 from util import cycle, kernel_images, plot_convolution
 #%%
 
@@ -48,17 +52,21 @@ def set_seed(seed=None, seed_torch=True):
 
 def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S"),
           iterations: int = 500000,
+          # adding a line to use my poisson model for encoder
+          use_poisson_model: bool = False,  # Whether to use the Poisson neural response model
           same_video_batch: bool = False,  # sampling minibatch from a single video file
           random_flip: bool = True,  # random up-and-down, left-and-right video flip after sampling the batch
           batch_size: int = 128, 
-          # change to palmer_full - full ds here
+          # change to palmer_full - full ds here DP
         #   data: str = "palmer", 
           data: str = "palmer_full",
           kernel_size: int = 18,  # kernel shape is kernel_size * kernel_size (square shape)
           temporal_kernel_size: int = 20,
           input_padding: Optional[str] = None,  # ["data", "zero"]
           circle_masking: bool = True,  # apply circular masking to data
-          neurons: int = 144,  # number of neurons, J
+          neurons: int = 144,  # number of neurons, J 
+         # trying num neurons from fig 1 descritpion DP
+        #   neurons: int = 160,  # number of neurons, J
           frames: int = 20,  # number of frames, T
           jittering_start: Optional[int] = 20000,  # method that jitters the kernels for faster optimization
           jittering_stop: Optional[int] = 200000,
@@ -67,11 +75,18 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
           centering_weight: float = 0.0,  # method that helps kernels localize (not used in the NeurIPS submission)
           centering_start: int = 0,
           centering_stop: int = -1,
-          input_noise: float = 0.1,  # sigma_in (standard deviation of the Gaussian input noise)
-          output_noise: float = 1.0,  # sigma_out (standard deviation of the Gaussian output noise)
+          # change input noise to supplementary figure 1 values DP
+          input_noise: float = 0.4,  # sigma_in (standard deviation of the Gaussian input noise)
+          output_noise: float = 1.25,  # sigma_out (standard deviation of the Gaussian output noise) 
+        #   input_noise: float = 0.1,  # sigma_in (standard deviation of the Gaussian input noise)
+        #   output_noise: float = 1.0,  # sigma_out (standard deviation of the Gaussian output noise) 
+        #   nonlinearity: str = 'relu',
           nonlinearity: str = "softplus",  # ["softplus", "relu", "linear", "absolute"]
+          # this is the beta for KL, not beta for NL DP
           beta: float = -0.5,  # -0.5 by default to conform to the K&S loss
-          shape: Optional[str] = "difference-of-gaussian",  # "difference-of-gaussian" for Oneshape case
+          # README reports they ONLY use DoG for this research DP
+          shape: Optional[str] = None, #"difference-of-gaussian",  # "difference-of-gaussian" for Oneshape case 
+        #   shape: Optional[str] = "gaussian",  # "difference-of-gaussian" for Oneshape case 
           individual_shapes: bool = True,  # individual size of the RFs can be different for the Oneshape case
           optimizer: str = "adam",  # can be "adam" or "sgd"
           learning_rate: float = 0.001,
@@ -80,7 +95,7 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
           maxgradnorm: float = 20.0,
           load_checkpoint: str = None,  # path of the checkpoint file to resume training from
           # only use cuda:0 from mach
-          device: str = 'cuda:0' if torch.cuda.is_available() else 'cpu',
+          device: str = 'cuda:1' if torch.cuda.is_available() else 'cpu',
           neural_type: Optional[str] = None,  # only used for FilteredVideoDataset (NeurIPS paper Fig 5)
           fix_first_two_centers: bool = False,  # only used for FilteredVideoDataset experiments (NeurIPS paper Fig 5)
           random_seed: str = 44,
@@ -116,10 +131,14 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
         assert temporal_kernel_size == 1
         dataset = KyotoNaturalImages("kyoto", kernel_size, circle_masking, device=device)
     else:
+        #                    (palmer_full, 18,   20,          true,            None,      true,        none,         0.1: only used in filtered video dataset)       DP
+        # creates an instance of dataset, which makes a segment for a given movie (specified by index, which is set randomly each time its called) DP
         dataset = get_dataset(data, kernel_size, data_frames, circle_masking, group_size, random_flip, neural_type, input_noise)
-
+    
+    # calculates covariance for that segment (only one segment per video) using 100000 samples from that segment DP
     data_covariance = dataset.covariance()
 
+    # palmer_full does not inherently come with noise - noise is added in the forward pass of model
     data_has_noise = False
 
     if data == "pink_tempfilter" or data == "real_tempfilter":
@@ -148,7 +167,17 @@ def train(logdir: str = datetime.now().strftime(f"{gettempdir()}/%y%m%d-%H%M%S")
         fix_first_two_centers=fix_first_two_centers,
     )
 
-    model = Retina(**model_args).to(device)
+    # adding lines to incorporate my poisson encoder
+    # Choose which model to use based on the parameter 
+
+    if use_poisson_model:
+        model = PoissonRetina(**model_args).to(device)
+        print("Using Poisson neural response model")
+    else:
+        model = Retina(**model_args).to(device)
+        print("Using standard Gaussian neural response model")
+        
+    # model = Retina(**model_args).to(device)
     model_args["data_covariance"] = None
 
     H_X = data_covariance.cholesky().diag().log2().sum().item() + model.D / 2.0 * np.log2(2 * np.pi * np.e)

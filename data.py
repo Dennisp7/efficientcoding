@@ -19,14 +19,43 @@ def circular_mask(kernel_size: int):
     :param kernel_size:
     :return: masked image with slope with width 1?
     """
-    radius = kernel_size / 2 - 0.5
-    x = torch.linspace(-radius, radius, kernel_size)
+    radius = kernel_size / 2 - 0.5 # 8.5 DP
+    x = torch.linspace(-radius, radius, kernel_size) # 18 vals from -8.5 to 8.5 spaced by 1.0 DP
     y = torch.linspace(-radius, radius, kernel_size)
-    xx, yy = torch.meshgrid(x, y)
+    xx, yy = torch.meshgrid(x, y) 
+    # more DP notes on how mask works:
+        # xx: each row has one val from the vector above repeated 18 times. for ex, first row: -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000, -8.5000  
+        # yy: each row has the regular original vector. For example: -8.5000, -7.5000, -6.5000, -5.5000, -4.5000, -3.5000, -2.5000, -1.5000, -0.5000,  0.5000,  1.5000,  2.5000,  3.5000,  4.5000,  5.5000,  6.5000, 7.5000,  8.5000
+        # basically, xx is yy.t and vice versa 
+        # xxyy matrix consists of two matrices [xx,yy] 
+        # xx[ij] is x coordinate 
+        # yy[ij] is y coordinate 
+        # torch.sqrt(xx ** 2 + yy ** 2) is calculating dist/length for each component of xx and yy 
+        # this 
+        # mask = torch.clamp(radius - torch.sqrt(xx ** 2 + yy ** 2) + 1, min=0.0001, max=1) 
+        # takes radius (8.5) subtracted by dist + 1
+        # example radius (8.5) - (dist(xxyy[0,0]) = 12.02) + 1
+        # ~ -2.52 
+        # so, now you take resulting value and see where it is in the clamp from 0.0001 to 1 
+        # mask = torch.clamp(-2.52 , min=0.0001, max=1) 
+        # results in tensor(1.0000e-04) or 0.0001
+        # if vals < min (0.0001), they clamp to min
+        # if vals > max (1), they clamp to max 
+        # if vals in between min and max, they stay the same
+
+        # purpose: get full coordinate system of kernel and see if vals fall w/in or out of radius
+        # change them accordingly so values near center are 1 and values towards the edge are near 0
+        # applying these clamped values multiply corresponding kernel value by 1 or 0.0001 so they are the same or made smaller 
+        # creates a circle where values diffuse from the center
+        # see demo code of mask in simple_DoG_model script
+
     mask = torch.clamp(radius - torch.sqrt(xx ** 2 + yy ** 2) + 1, min=0.0001, max=1)
     return mask
 
-
+# DP comments: 
+    # index auto set to 0 
+    # calculates covariance of a given segment using preset num of samples (100000 here)
+    # so each call to dataset[index] returns a different randomly cropped, flipped, masked and processed segment from the video, not the entire video.
 def estimated_covariance(dataset: Dataset, num_samples: int, device: Union[str, torch.device] = None, index=0):
     loop = trange(num_samples, desc="Taking samples for covariance calculation", ncols=99)
     samples = torch.stack([dataset[index].flatten() for _ in loop])  # / dataset.mask
@@ -37,7 +66,7 @@ def estimated_covariance(dataset: Dataset, num_samples: int, device: Union[str, 
     C = (C + C.t()) / 2.0  # make it numerically symmetric
     return C
 
-
+# need to go back and verify that the data is grayscaled and has all changes jun uses - also see dif of using ffmpeg DP
 class VideoDataset(Dataset):
     def __init__(self,
                  root: str,
@@ -45,8 +74,11 @@ class VideoDataset(Dataset):
                  frames: int,
                  circle_masking: bool,
                  group_size: Optional[int],
-                 random_flip: bool):
+                 random_flip: bool): 
+        # list of tuples with  [video,      mean,   std]    DP
         self.videos: List[Tuple[np.ndarray, float, float]] = []
+
+        # setting up vars DP
         if isinstance(kernel_size, int):
             self.mask = circular_mask(kernel_size) if circle_masking else torch.ones((kernel_size, kernel_size))
         else:
@@ -59,6 +91,7 @@ class VideoDataset(Dataset):
         self.group_size = group_size
         self.random_flip = random_flip
 
+        # grabbing npy videos DP
         files = sorted(glob(f"{root}/*.npy"))
         if "FILENAME_PREFIX" in os.environ:
             files = [file for file in files if os.path.basename(file).startswith(os.environ["FILENAME_PREFIX"])]
@@ -85,6 +118,7 @@ class VideoDataset(Dataset):
     def __getitem__(self, index):
         if isinstance(index, str):
             index = self.files.index(index)
+        # if none, it grabs random index
         elif self.group_size is None:
             index = np.random.choice(len(self.videos))
         else:
@@ -94,24 +128,36 @@ class VideoDataset(Dataset):
 
         video, mean, std = self.videos[index]
 
-        # begin = np.random.choice(video.shape[0] - self.frames)
+        # this section is creating the bounds for a segment: begin, end, top, bottom, left, and right DP
+        # begin = np.random.choice(video.shape[0] - self.frames) 
+        # video shape is (np.array, mean, std); index 0 = actual movie (Frames, 512, 512) DP
+        # chooses random frame from: frame count from movie - 20, DP 
+        # this is the starting index DP
         begin = np.random.choice(min(800, video.shape[0]) - self.frames)
+        # ending index = start index + 20 frames DP
         end = begin + self.frames
+        # getting top of frame boundary: video.shape[1]: 512 - self.kernel_size[0]: 18 = 494 DP 
+        # np.random.choice(492) takes in that number and generates a random choice of a 3 digit number DP
         top = np.random.choice(video.shape[1] - self.kernel_size[0])
+        # takes resulting random number and adds 18 DP
         bottom = top + self.kernel_size[0]
         left = np.random.choice(video.shape[2] - self.kernel_size[1])
         right = left + self.kernel_size[1]
 
+        # normalizes the segment by subtracting mean and dividing by std
         segment = (video[begin:end, top:bottom, left:right].astype(np.float32) - mean) / std
         if self.random_flip:
+            # this will never be true - maybe they were just checking for a bug? DP
             if np.random.rand() > 1.1:
                 segment = segment[:1, :, :].repeat(segment.shape[0], axis=0)
             else:
+                # horizontal flip if rand val less than 0.5 (probability based flip) DP
                 if np.random.rand() < 0.5:
-                    segment = segment[:, ::-1, :]
+                    segment = segment[:, ::-1, :] 
+                # vertical flip if cond met DP
                 if np.random.rand() < 0.5:
                     segment = segment[:, :, ::-1]
-
+        # creating a copy since orig data is read only - now stored in memory as tensor DP
         return torch.from_numpy(segment.copy()) * self.mask
 
     def covariance(self, num_samples: int = 100000, device: Union[str, torch.device] = None, index=0):

@@ -19,17 +19,17 @@ class DiffExponentialShape(nn.Module):
         self.max_tau = (frames - 1) / 3.0
 
         if not individual_shapes:
-            self.scale1 = nn.Parameter(0.02 * torch.randn(1, 1, 1) + 1.1)
+            self.scale1 = nn.Parameter(0.02 * torch.randn(1, 1, 1) + 1.1) 
             self.scale2 = nn.Parameter(0.02 * torch.randn(1, 1, 1) - 0.95)
             self.logit_tau1 = nn.Parameter(0.02 * torch.randn(1, 1, 1) + 1.1)
             self.logit_tau2 = nn.Parameter(0.02 * torch.randn(1, 1, 1) + 1.1 * 1.25)
 
         else:
-            self.scale1 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1)
-            self.scale2 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) - 0.95)
-            self.logit_tau1 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1)
-            self.logit_tau2 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1 * 1.25)
-
+            self.scale1 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1) # alphaj DP
+            self.scale2 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) - 0.95) # alphaj' DP
+            self.logit_tau1 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1) # Tj DP
+            self.logit_tau2 = nn.Parameter(0.02 * torch.randn(neurons, 1, 1) + 1.1 * 1.25) # Tj' DP
+        # might be the parameter to change; try 3 and see how weights look DP
         self.nf1 = 6
         self.nf2 = 6
         self.frames = frames
@@ -238,9 +238,14 @@ class Encoder(nn.Module):
         if self.nonlinearity == "relu":
             r = gain * (y - bias).relu()
             grad = ((y - bias) > 0).float()  # shape = [B, T, J]
-        elif self.nonlinearity == "softplus":
-            r = gain * F.softplus(y - bias, beta=2.5)
-            grad = torch.sigmoid(2.5 * (y-bias))
+        elif self.nonlinearity == "softplus": 
+            # possible bug here: this is way higher than reported in the paper DP
+            # If RFs don't match figure, change to what's reported in paper 0.25 on both r and gain DP
+
+            # r = gain * F.softplus(y - bias, beta=2.5) # orignal
+            # grad = torch.sigmoid(2.5 * (y-bias)) # orginal 
+            r = gain * F.softplus(y - bias, beta=0.25) # updated
+            grad = torch.sigmoid(0.25 * (y-bias)) # updated
         elif self.nonlinearity == "linear":
             r = gain * (y - bias)
             grad = 1.0
@@ -364,3 +369,306 @@ class Retina(nn.Module):
             o.logdet_denominator_eff = 2 * L_denominator_eff.diagonal(dim1=-1, dim2=-2).log2().sum(dim=-1)
 
         return o
+    
+# --------------------------- NEW CLASSES TO INTEGRATE MY MODEL -------------------------
+class PoissonSpatiotemporalEncoder(nn.Module):
+    def __init__(self,
+                 kernel_size: int,
+                 neurons: int,
+                 frames: int,
+                 temporal_kernel_size: int,
+                 zero_padding: Tuple[int, int],
+                 nonlinearity: str,
+                 input_noise: float,
+                 data_has_noise: bool,
+                 output_noise: float,
+                 shape: Optional[str],
+                 individual_shapes: bool,
+                 data_covariance: torch.Tensor,
+                 temporal_filter_type: Optional[str],
+                 fix_first_two_centers: bool,
+                 learn_lambda_p: bool = True,
+                 fixed_lambda_p_value: float = 1.0):
+
+        super().__init__()
+        # Initialize with Jun's parameters for spatiotemporal processing
+        self.kernel_size = kernel_size
+        self.D = kernel_size * kernel_size
+        self.J = neurons
+        self.T = frames
+        self.K = temporal_kernel_size
+        self.padding_left, self.padding_right = zero_padding
+        self.nonlinearity = nonlinearity
+        self.data_has_noise = data_has_noise
+        self.input_noise = input_noise
+        self.output_noise = output_noise
+        self.shape = shape
+        self.temporal_filter_type = temporal_filter_type
+        self.fix_first_two_centers = fix_first_two_centers
+
+        # Register data covariance buffer
+        self.register_buffer("data_covariance", data_covariance, persistent=False)
+
+        # Initialize spatial components exactly as in Jun's model
+        if shape is not None:
+            kernel_x = torch.rand(self.J) * (kernel_size - 1) / 2.0 + (kernel_size - 1) / 4.0
+            kernel_y = torch.rand(self.J) * (kernel_size - 1) / 2.0 + (kernel_size - 1) / 4.0
+            kernel_x[:2].fill_((kernel_size - 1) / 2.0)
+            kernel_y[:2].fill_((kernel_size - 1) / 2.0)
+            self.kernel_centers = nn.Parameter(torch.stack([kernel_x, kernel_y], dim=1))
+
+            def zero_first_two(grad):
+                grad = grad.clone()
+                grad[:2, :] = 0
+                return grad
+
+            if fix_first_two_centers:
+                self.kernel_centers.register_hook(zero_first_two)
+
+            assert self.J % 2 == 0, "only even numbers are allowed for 'neurons'"
+            self.register_buffer("kernel_polarities", torch.tensor([-1, 1] * (self.J // 2)))
+            shape_module = get_shape_module(shape)
+            self.shape_function = shape_module(kernel_size, self.J if individual_shapes else 1)
+        else:
+            W = 0.02 * torch.randn(self.D, self.J)
+            self.W = nn.Parameter(W / W.norm(dim=0, keepdim=True))  # spatial kernel, [D, J]
+
+        # Initialize gain and bias parameters (from Jun's model)
+        self.logA = nn.Parameter(0.02 * torch.randn(self.J))  # gain of the nonlinearity
+        self.logB = nn.Parameter(0.02 * torch.randn(self.J) - 1)  # bias of the nonlinearity
+
+        # Initialize temporal components exactly as in Jun's model
+        if self.K > 1:
+            if self.temporal_filter_type == 'difference-of-exponentials':
+                self.convolution_kernel_shape = DiffExponentialShape(self.J, self.K, individual_shapes)
+            else:  # no parameterization assumption for temporal kernels
+                self.convolution_kernel = nn.Parameter(0.02 * torch.randn(self.J, 1, self.K))
+        else:
+            self.padding_left = 0
+            self.padding_right = 0
+            self.convolution_kernel = None
+
+        # Add Poisson-specific parameters from your model
+        self.lambda_p = nn.Parameter(
+            torch.ones(self.J) * fixed_lambda_p_value,
+            requires_grad=learn_lambda_p
+        )
+        
+        # Add a linear layer to transform filtered responses to Poisson rates
+        self.fc_lambda = nn.Linear(self.J, self.J)
+
+    # Include Jun's utility methods unchanged
+    def kernel_variance(self):
+        W = self.W / self.W.norm(dim=0, keepdim=True)
+        W = W.reshape(1, self.kernel_size, self.kernel_size, self.J).mean(dim=0)
+        Wx = W.pow(2).sum(dim=1)
+        Wy = W.pow(2).sum(dim=0)
+
+        coordsX = torch.arange(self.kernel_size, dtype=torch.float32, device=W.device)[:, None]
+        meanWx = torch.sum(coordsX * Wx, dim=0)
+        varWx = torch.sum((coordsX - meanWx).pow(2) * Wx, dim=0)
+        coordsY = torch.arange(self.kernel_size, dtype=torch.float32, device=W.device)[:, None]
+        meanWy = torch.sum(coordsY * Wy, dim=0)
+        varWy = torch.sum((coordsY - meanWy).pow(2) * Wy, dim=0)
+
+        return (varWx + varWy).mean()
+
+    def jitter_kernels(self, power=1.0):
+        if hasattr(self, 'shape_function') and isinstance(self.shape_function, Shape):
+            center = radius = (self.kernel_size - 1) / 2.0
+            with torch.no_grad():
+                for i in range(self.J):
+                    tries = 0
+                    while True:
+                        drifted = self.kernel_centers[i] + power * torch.randn_like(self.kernel_centers[i])
+                        if ((drifted[0] - center) ** 2 + (drifted[1] - center) ** 2).item() <= radius ** 2:
+                            self.kernel_centers[i] = drifted
+                            break
+                        tries += 1
+                        if tries >= 10:
+                            r = torch.rand([]) ** 0.5
+                            theta = 2 * np.pi * torch.rand([])
+                            self.kernel_centers[i, 0] = center + r * theta.cos()
+                            self.kernel_centers[i, 1] = center + r * theta.sin()
+                            break
+        else:
+            with torch.no_grad():
+                self.W.mul_(self.W.abs().pow(power))
+                self.normalize()
+
+    # Jun's spatiotemporal processing - unchanged
+    def spatiotemporal(self, input: torch.Tensor):
+        # input.shape = [*, L, D]  (L = length of the input frames + paddings)
+        y = input @ self.W  # y.shape = [*, L, J]
+
+        if self.K > 1:
+            y = y.transpose(-1, -2)  # y.shape = [*, J, L]
+            y = F.pad(y, [self.padding_left, self.padding_right])
+            if self.temporal_filter_type is None:
+                convolution_kernel = self.convolution_kernel
+                convolution_kernel = convolution_kernel / convolution_kernel.norm(dim=-1, keepdim=True)
+            else:
+                self.convolution_kernel = self.convolution_kernel_shape()
+                convolution_kernel = self.convolution_kernel / self.convolution_kernel.norm(dim=-1, keepdim=True)
+            # convolution_kernel.shape = [J, 1, K]
+            y = F.conv1d(y, convolution_kernel, groups=self.J)  # y.shape = [*, J, T]
+            y = y.transpose(-1, -2)  # y.shape = [*, T, J]
+
+        return y
+
+    # Jun's matrix calculation - unchanged
+    def matrix_spatiotemporal(self, input: torch.Tensor, gain: torch.Tensor):
+        assert input.ndim == 2 and input.shape[0] == input.shape[1]
+        L = input.shape[0] // self.D
+        D = self.D
+
+        x = input.reshape(L * D, L, D)
+        x = self.spatiotemporal(x)
+        x = x.permute(1, 2, 0)
+        x = x.reshape(-1, L, D)
+        output_dim = x.shape[0]
+        x = self.spatiotemporal(x)
+        x = x.flatten(start_dim=1)
+
+        G = gain.reshape(-1, output_dim)
+        x = G[:, :, None] * x * G[:, None, :]
+
+        return x
+
+    def normalize(self):
+        with torch.no_grad():
+            if hasattr(self, 'W'):
+                self.W /= self.W.norm(dim=0, keepdim=True)
+
+    # Your Poisson KL calculation
+    def poisson_kl_divergence(self, lambda_q, lambda_p):
+        """Computes KL divergence between two Poisson distributions"""
+        lambda_q = torch.clamp(lambda_q, min=1e-8)
+        lambda_p = torch.clamp(lambda_p, min=1e-8)
+
+        kl_div = lambda_q * (torch.log(lambda_q) - torch.log(lambda_p)) - (lambda_q - lambda_p)
+        return kl_div
+
+    def forward(self, image: torch.Tensor):
+        D = self.D
+        L = image.shape[1]  # = T if zero-padding, T+K-1 if data-padding
+
+        # Apply shape function if needed (like Jun's model)
+        if self.shape is not None:
+            self.W = self.shape_function(self.kernel_centers, self.kernel_polarities)
+
+        # Process spatiotemporal filtering (like Jun's model)
+        gain = self.logA.exp()
+        bias = self.logB.exp()
+        nx = self.input_noise * torch.randn_like(image)
+        
+        if self.data_has_noise:
+            y = self.spatiotemporal(image)
+        else:
+            y = self.spatiotemporal(image + nx)
+        
+        # Apply nonlinearity (like Jun's model)
+        if self.nonlinearity == "relu":
+            r = gain * (y - bias).relu()
+            grad = ((y - bias) > 0).float()
+        elif self.nonlinearity == "softplus":
+
+            # r = gain * F.softplus(y - bias, beta=2.5) # orignal
+            # grad = torch.sigmoid(2.5 * (y-bias)) # orginal 
+
+            r = gain * F.softplus(y - bias, beta=0.25)
+            grad = torch.sigmoid(0.25 * (y-bias))
+        elif self.nonlinearity == "linear":
+            r = gain * (y - bias)
+            grad = 1.0
+        elif self.nonlinearity == "absolute":
+            r = (gain * (y - bias)).abs()
+            grad = 1.0
+
+        # Add output noise (like Jun's model)
+        nr = self.output_noise * torch.randn_like(r)
+        z_continuous = r + nr
+        
+        # Calculate covariance matrices (like Jun's model)
+        gain = gain * grad
+        C_nx = self.input_noise ** 2 * torch.eye(L * D, device=image.device)
+        C_zx = self.matrix_spatiotemporal(C_nx, gain)
+        C_nr = self.output_noise ** 2 * torch.eye(C_zx.shape[-1], device=image.device)
+        C_zx += C_nr
+        C_z = self.matrix_spatiotemporal(self.data_covariance + C_nx, gain)
+        C_z += C_nr
+        
+        # Poisson part (from your model)
+        # Transform continuous response to Poisson rate
+        lambda_q_flat = self.fc_lambda(r.reshape(-1, self.J))
+        lambda_q = torch.exp(lambda_q_flat).reshape(r.shape)  # Ensure positive rates
+        
+        # Get the prior lambda
+        lambda_p = torch.exp(self.lambda_p)
+        
+        # Sample from Poisson distribution
+        z_poisson = torch.distributions.Poisson(lambda_q).sample()
+        
+        # Calculate KL divergence
+        kl_div = self.poisson_kl_divergence(lambda_q, lambda_p.view(1, 1, -1))
+        
+        # Return all needed values
+        return z_poisson, r, C_z, C_zx, None, kl_div 
+    
+class PoissonRetina(nn.Module):
+    def __init__(self,
+                 kernel_size: int,
+                 neurons: int,
+                 frames: int,
+                 temporal_kernel_size: int,
+                 zero_padding: Tuple[int, int],
+                 input_noise: float,
+                 data_has_noise: bool,
+                 output_noise: float,
+                 nonlinearity: str,
+                 shape: Optional[str],
+                 individual_shapes: bool,
+                 data_covariance: torch.Tensor,
+                 beta: float,
+                 rho: float,
+                 temporal_filter_type: Optional[str],
+                 fix_first_two_centers: bool):
+
+        super().__init__()
+        self.beta = beta
+        self.rho = rho
+        self.D = kernel_size * kernel_size
+
+        assert nonlinearity in {"relu", "softplus", "linear", "absolute"}
+
+        # Use our Poisson encoder with Jun's spatiotemporal processing
+        self.encoder = PoissonSpatiotemporalEncoder(
+            kernel_size, neurons, frames, temporal_kernel_size,
+            zero_padding, nonlinearity, input_noise, data_has_noise, output_noise, shape,
+            individual_shapes, data_covariance, temporal_filter_type, fix_first_two_centers
+        )
+
+        # Keep Jun's Lambda parameter for the constraint
+        self.Lambda = nn.Parameter(torch.rand(neurons))
+
+    def forward(self, x) -> OutputTerms:
+        batch_size = x.shape[0]
+        x = x.view(batch_size, -1, self.D)  # x.shape = [B, L, D] (L: input time points)
+        o = OutputTerms(self)
+        
+        # Get outputs from our encoder
+        # The return signature matches Jun's encoder for compatibility
+        z_poisson, r, numerator, denominator, denominator_eff, kl_div = self.encoder(x)
+        
+        # Set outputs in the OutputTerms object
+        o.z = z_poisson  # Use Poisson samples instead of Gaussian
+        o.r = r  # Keep the continuous response for the rate constraint
+        
+        # Handle KL divergence calculation
+        if numerator is not None:
+            # For compatibility with Jun's training loop, convert KL to the expected format
+            # Jun's model expects logdet_numerator and logdet_denominator to compute KL
+            # We'll set these directly from our Poisson KL
+            batch_kl = kl_div.sum(dim=(1, 2))  # Sum over time and neurons
+            o.logdet_numerator = batch_kl  # Direct assignment of KL (numerator-denominator)
+            o.logdet_denominator = torch.zeros_like(batch_kl)  # Make
